@@ -9,6 +9,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
+from multiprocessing import Process, current_process
+import math
 
 SCOPES = ['https://www.googleapis.com/auth/drive']
 LOG_FILE = "download_progress.log"
@@ -191,15 +193,48 @@ def replicate_computers_section(service, local_base_path):
 
     write_log(f"🎉 All folders processed successfully at '{local_base_path}'.")
 
+def split_into_batches(lst, n):
+    """Split a list into `n` approximately equal batches."""
+    k, m = divmod(len(lst), n)
+    return (lst[i*k + min(i, m):(i+1)*k + min(i+1, m)] for i in range(n))
+
+def process_batch(service, folders_batch, local_base_path, batch_id):
+    for index, folder in enumerate(folders_batch, 1):
+        folder_path = os.path.join(local_base_path, folder['name'])
+        write_log(f"[Batch-{batch_id}] 📂 ({index}/{len(folders_batch)}) Processing: {folder['name']}")
+        process_folder(service, folder['id'], folder_path)
+    write_log(f"[Batch-{batch_id}] ✅ Batch complete.")
+
 def main():
     try:
         service = authenticate_drive()
         local_base_folder = os.path.join(os.getcwd(), "Computers_Drive")
         os.makedirs(local_base_folder, exist_ok=True)
-        replicate_computers_section(service, local_base_folder)
+
+        computers_folders = fetch_computers_root_folders(service)
+        if not computers_folders:
+            write_log("❌ No folders found in 'Computers' section.")
+            return
+
+        num_cores = os.cpu_count() or 4
+        print(f"Available Cores: {num_cores}")
+        batches = list(split_into_batches(computers_folders, num_cores))
+
+        write_log(f"🚀 Starting download with {num_cores} parallel batches.")
+
+        processes = []
+        for i, batch in enumerate(batches):
+            p = Process(target=process_batch, args=(service, batch, local_base_folder, i+1))
+            p.start()
+            processes.append(p)
+
+        for p in processes:
+            p.join()
+
+        write_log("🎉 All parallel batches completed successfully!")
+
     except Exception:
         write_log(f"🔥 Fatal error: {traceback.format_exc()}")
 
 if __name__ == '__main__':
-    print(f"Available Cores: {os.cpu_count()}")
     main()
