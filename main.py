@@ -59,13 +59,13 @@ def resize_image(file_path, size=(800, 800)):
             img.save(file_path, format='JPEG', quality=90)
 
         new_file_size = os.path.getsize(file_path)
-
+        #"""
         write_log(
             f"    • dimensions   = Original: {original_dimensions} ➜ New dimensions: {img.size}\n"
             f"    • Size on disk = Original: {human_readable_size(original_file_size)} ➜ After Resizing: {human_readable_size(new_file_size)}\n"
             f"🖼️ Resized Save to: {file_path}\n"
         )
-
+        #"""
     except UnidentifiedImageError:
         write_log(f"⚠️ Unidentified image format: {file_path}")
     except Exception as e:
@@ -76,19 +76,6 @@ def download_image(service, file_id, file_name, folder_path):
     try:
         os.makedirs(folder_path, exist_ok=True)
         file_path = os.path.join(folder_path, file_name)
-
-        if os.path.exists(file_path):
-            # Get last modified time of the file
-            modified_time = datetime.fromtimestamp(os.path.getmtime(file_path))
-            age_days = (datetime.now() - modified_time).days
-
-            if age_days > 3:
-                os.remove(file_path)
-                write_log(f"🗑️ Deleted old file (>{age_days} days): {file_path}")
-                return
-            else:
-                write_log(f"⏩ Skipped (already exists & recent - {age_days} days): {file_path}")
-                return
 
         request = service.files().get_media(fileId=file_id)
         with open(file_path, 'wb') as f:
@@ -106,42 +93,79 @@ def download_image(service, file_id, file_name, folder_path):
         write_log(f"❌ Error downloading {file_name}: {traceback.format_exc()}")
 
 
-def process_folder(service, folder_id, parent_path):
+def process_folder(service, folder_id, parent_path, max_passes=3, delay_between_passes=30):
     os.makedirs(parent_path, exist_ok=True)
-    write_log(f"\n--------📁 Processing folder: {parent_path}--------\n")
+    write_log(f"\n--------📁 Processing folder: {parent_path}--------")
 
-    page_token = None
-    while True:
+    already_downloaded = set(os.listdir(parent_path))  # Track existing files
+    for attempt in range(max_passes):
+        write_log(f"🔁 Pass {attempt + 1}/{max_passes} for folder: {parent_path}")
+        new_files_downloaded = 0
+
         try:
-            response = service.files().list(
-                q=f"'{folder_id}' in parents and trashed = false",
-                spaces='drive',
-                fields="nextPageToken, files(id, name, mimeType)",
-                pageSize=100,
-                pageToken=page_token
-            ).execute()
+            page_token = None
+            while True:
+                response = service.files().list(
+                    q=f"'{folder_id}' in parents and trashed = false",
+                    spaces='drive',
+                    fields="nextPageToken, files(id, name, mimeType)",
+                    pageSize=100,
+                    pageToken=page_token
+                ).execute()
 
-            image_files = []
-            subfolders = []
+                image_files = []
+                subfolders = []
 
-            for item in response.get('files', []):
-                if item['mimeType'] == 'application/vnd.google-apps.folder':
-                    subfolders.append(item)
-                elif 'image/' in item['mimeType']:
-                    image_files.append(item)
+                for item in response.get('files', []):
+                    if item['mimeType'] == 'application/vnd.google-apps.folder':
+                        subfolders.append(item)
+                    elif 'image/' in item['mimeType']:
+                        image_files.append(item)
 
-            for f in image_files:
-                download_image(service, f['id'], f['name'], parent_path)
+                for f in image_files:
+                    if f['name'] not in already_downloaded:
+                        download_image(service, f['id'], f['name'], parent_path)
+                        already_downloaded.add(f['name'])
+                        new_files_downloaded += 1
+                    else:
+                        complete_path = os.path.join(parent_path, f['name'])
+                        if os.path.exists(complete_path):
+                            print("file already exists")
+                            # Get last modified time of the file
+                            modified_time = datetime.fromtimestamp(os.path.getmtime(complete_path))
+                            age_days = (datetime.now() - modified_time).days
 
-            for folder in subfolders:
-                process_folder(service, folder['id'], os.path.join(parent_path, folder['name']))
+                            if age_days > 3:
+                                os.remove(complete_path)
+                                write_log(f"🗑️ Deleted old file (>{age_days} days): {complete_path}")
+                                return
+                            else:
+                                write_log(f"⏩ Skipped (already exists & recent - {age_days} days): {complete_path}")
+                                return
 
-            page_token = response.get('nextPageToken', None)
-            if page_token is None:
-                break
+
+                for folder in subfolders:
+                    process_folder(service, folder['id'], os.path.join(parent_path, folder['name']),
+                                   max_passes=max_passes, delay_between_passes=delay_between_passes)
+
+                page_token = response.get('nextPageToken', None)
+                if not page_token:
+                    break
+
         except Exception:
             write_log(f"⚠️ Error in folder {parent_path}: {traceback.format_exc()}")
             break
+
+        if new_files_downloaded == 0:
+            write_log(f"✅ No new files found in pass {attempt + 1}, stopping early.")
+            break  # Stop early if no new files were added in this pass
+
+        if attempt < max_passes - 1:
+            write_log(f"⏳ Waiting {delay_between_passes}s before next pass...")
+            time.sleep(delay_between_passes)
+
+    write_log(f"🏁 Finished all passes for: {parent_path}")
+
 
 def fetch_computers_root_folders(service):
     write_log("🔍 Fetching 'Computers' section folders...")
@@ -202,7 +226,7 @@ def process_batch(service, folders_batch, local_base_path, batch_id):
     for index, folder in enumerate(folders_batch, 1):
         folder_path = os.path.join(local_base_path, folder['name'])
         write_log(f"[Batch-{batch_id}] 📂 ({index}/{len(folders_batch)}) Processing: {folder['name']}")
-        process_folder(service, folder['id'], folder_path)
+        process_folder(service, folder['id'], folder_path, max_passes=3, delay_between_passes=30)
     write_log(f"[Batch-{batch_id}] ✅ Batch complete.")
 
 def main():
@@ -217,7 +241,6 @@ def main():
             return
 
         num_cores = os.cpu_count() or 4
-        print(f"Available Cores: {num_cores}")
         batches = list(split_into_batches(computers_folders, num_cores))
 
         write_log(f"🚀 Starting download with {num_cores} parallel batches.")
