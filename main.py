@@ -1,106 +1,119 @@
 import os
+import sys
 import io
 import traceback
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
+from multiprocessing import Process, freeze_support
 from PIL import Image, UnidentifiedImageError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
-from multiprocessing import Process, current_process
-import math
 
+# --- Path Configuration ---
+if getattr(sys, 'frozen', False):
+    BASE_DIR = Path(sys.executable).parent
+else:
+    BASE_DIR = Path(__file__).parent
+
+# --- Constants ---
 SCOPES = ['https://www.googleapis.com/auth/drive']
-LOG_FILE = "download_progress.log"
+LOG_FILE = BASE_DIR / "download_progress.log"
 RESIZE_IMG = True
 THUMBNAIL_SIZE = (800, 800)
 
-BATCH_COUNT = os.cpu_count() or 8  # Fallback to 4 if unknown
-
-
+# --- Logging Setup ---
 def write_log(message):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_entry = f"[{timestamp}] {message}"
     with open(LOG_FILE, 'a', encoding='utf-8') as f:
-        f.write(f"{message}\n")
-    print(message)
+        f.write(f"{log_entry}\n")
+    print(log_entry)
 
+# --- Core Functions ---
 def authenticate_drive():
     creds = None
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    token_path = BASE_DIR / 'token.json'
+    credentials_path = BASE_DIR / 'credentials.json'
+    
+    if token_path.exists():
+        creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+    
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+            if not credentials_path.exists():
+                write_log("❌ Missing credentials.json file")
+                sys.exit(1)
+                
+            flow = InstalledAppFlow.from_client_secrets_file(
+                str(credentials_path), SCOPES)
             creds = flow.run_local_server(port=0)
-        with open('token.json', 'w') as token:
+        
+        with open(token_path, 'w') as token:
             token.write(creds.to_json())
+    
     return build('drive', 'v3', credentials=creds)
 
-
 def human_readable_size(size_bytes):
-    """Convert bytes to a human-readable format."""
     for unit in ['B', 'KB', 'MB', 'GB']:
         if size_bytes < 1024:
             return f"{size_bytes:.2f} {unit}"
         size_bytes /= 1024
     return f"{size_bytes:.2f} TB"
 
-
-def resize_image(file_path, size=(800, 800)):
+def resize_image(file_path):
     try:
         original_file_size = os.path.getsize(file_path)
         with Image.open(file_path) as img:
             original_dimensions = img.size
             img = img.convert("RGB")
-            img.thumbnail(size, Image.LANCZOS)
+            img.thumbnail(THUMBNAIL_SIZE, Image.LANCZOS)
             img.save(file_path, format='JPEG', quality=90)
 
         new_file_size = os.path.getsize(file_path)
-        #"""
         write_log(
-            f"    • dimensions   = Original: {original_dimensions} ➜ New dimensions: {img.size}\n"
-            f"    • Size on disk = Original: {human_readable_size(original_file_size)} ➜ After Resizing: {human_readable_size(new_file_size)}\n"
-            f"🖼️ Resized Save to: {file_path}\n"
+            f"    • Dimensions: {original_dimensions} → {img.size}\t"
+            f"    • Size: {human_readable_size(original_file_size)} → {human_readable_size(new_file_size)}\n"
+            f"🖼️ Resized: {file_path}"
         )
-        #"""
     except UnidentifiedImageError:
         write_log(f"⚠️ Unidentified image format: {file_path}")
     except Exception as e:
-        write_log(f"⚠️ Error resizing image {file_path}: {e}")
-
+        write_log(f"⚠️ Error resizing {file_path}: {str(e)}")
 
 def download_image(service, file_id, file_name, folder_path):
     try:
-        os.makedirs(folder_path, exist_ok=True)
-        file_path = os.path.join(folder_path, file_name)
+        target_dir = BASE_DIR / folder_path
+        target_dir.mkdir(parents=True, exist_ok=True)
+        file_path = target_dir / file_name
 
         request = service.files().get_media(fileId=file_id)
-        with open(file_path, 'wb') as f:
+        with file_path.open('wb') as f:
             downloader = MediaIoBaseDownload(f, request)
-            done = False
-            while not done:
-                status, done = downloader.next_chunk()
+            while not downloader.next_chunk()[1]: pass
 
         write_log(f"✅ Downloaded: {file_path}")
-        
         if RESIZE_IMG:
-            resize_image(file_path)
+            resize_image(str(file_path))
 
     except Exception as e:
         write_log(f"❌ Error downloading {file_name}: {traceback.format_exc()}")
 
+def process_folder(service, folder_id, parent_path, max_passes=3, delay=30):
+    parent_dir = BASE_DIR / parent_path
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    write_log(f"\n📁 Processing folder: {parent_path}")
 
-def process_folder(service, folder_id, parent_path, max_passes=3, delay_between_passes=30):
-    os.makedirs(parent_path, exist_ok=True)
-    write_log(f"\n--------📁 Processing folder: {parent_path}--------")
-
-    already_downloaded = set(os.listdir(parent_path))  # Track existing files
+    existing_files = {f.name for f in parent_dir.iterdir() if f.is_file()}
+    
     for attempt in range(max_passes):
-        write_log(f"🔁 Pass {attempt + 1}/{max_passes} for folder: {parent_path}")
-        new_files_downloaded = 0
+        write_log(f"🔁 Pass {attempt + 1}/{max_passes} for {parent_path}")
+        new_files = 0
 
         try:
             page_token = None
@@ -113,151 +126,131 @@ def process_folder(service, folder_id, parent_path, max_passes=3, delay_between_
                     pageToken=page_token
                 ).execute()
 
-                image_files = []
-                subfolders = []
+                items = response.get('files', [])
+                subfolders = [f for f in items if f['mimeType'] == 'application/vnd.google-apps.folder']
+                images = [f for f in items if 'image/' in f['mimeType']]
 
-                for item in response.get('files', []):
-                    if item['mimeType'] == 'application/vnd.google-apps.folder':
-                        subfolders.append(item)
-                    elif 'image/' in item['mimeType']:
-                        image_files.append(item)
-
-                for f in image_files:
-                    if f['name'] not in already_downloaded:
-                        download_image(service, f['id'], f['name'], parent_path)
-                        already_downloaded.add(f['name'])
-                        new_files_downloaded += 1
-                    else:
-                        complete_path = os.path.join(parent_path, f['name'])
-                        if os.path.exists(complete_path):
-                            print("file already exists")
-                            # Get last modified time of the file
-                            modified_time = datetime.fromtimestamp(os.path.getmtime(complete_path))
-                            age_days = (datetime.now() - modified_time).days
-
-                            if age_days > 3:
-                                os.remove(complete_path)
-                                write_log(f"🗑️ Deleted old file (>{age_days} days): {complete_path}")
-                                return
+                for img in images:
+                    file_path = parent_dir / img['name']
+                    
+                    # File existence and age check
+                    if img['name'] in existing_files:
+                        if file_path.exists():
+                            file_age = datetime.now() - datetime.fromtimestamp(file_path.stat().st_mtime)
+                            if file_age.days > 3:
+                                file_path.unlink()
+                                write_log(f"🗑️ Deleted old file ({file_age.days} days): {file_path}")
+                                # Download fresh copy after deletion
+                                download_image(service, img['id'], img['name'], parent_path)
+                                new_files += 1
                             else:
-                                write_log(f"⏩ Skipped (already exists & recent - {age_days} days): {complete_path}")
-                                return
+                                write_log(f"⏩ Skipped recent file: {file_path} ({file_age.days} days old)")
+                        continue
+                    
+                    # New file download
+                    download_image(service, img['id'], img['name'], parent_path)
+                    existing_files.add(img['name'])
+                    new_files += 1
 
-
+                # Process subfolders
                 for folder in subfolders:
-                    process_folder(service, folder['id'], os.path.join(parent_path, folder['name']),
-                                   max_passes=max_passes, delay_between_passes=delay_between_passes)
+                    new_path = parent_dir / folder['name']
+                    process_folder(service, folder['id'], str(new_path.relative_to(BASE_DIR)))
 
-                page_token = response.get('nextPageToken', None)
+                page_token = response.get('nextPageToken')
                 if not page_token:
                     break
 
         except Exception:
-            write_log(f"⚠️ Error in folder {parent_path}: {traceback.format_exc()}")
+            write_log(f"⚠️ Folder error: {traceback.format_exc()}")
             break
 
-        if new_files_downloaded == 0:
-            write_log(f"✅ No new files found in pass {attempt + 1}, stopping early.")
-            break  # Stop early if no new files were added in this pass
+        if new_files == 0:
+            write_log(f"✅ No new files in pass {attempt + 1}")
+            break
 
         if attempt < max_passes - 1:
-            write_log(f"⏳ Waiting {delay_between_passes}s before next pass...")
-            time.sleep(delay_between_passes)
+            write_log(f"⏳ Waiting {delay}s...")
+            time.sleep(delay)
 
-    write_log(f"🏁 Finished all passes for: {parent_path}")
+    write_log(f"🏁 Finished: {parent_path}")
 
-
-def fetch_computers_root_folders(service):
-    write_log("🔍 Fetching 'Computers' section folders...")
-    computers_folders = []
+def fetch_computers_folders(service):
+    write_log("🔍 Fetching root folders...")
+    folders = []
     page_token = None
 
     while True:
         try:
             response = service.files().list(
-                q="mimeType='application/vnd.google-apps.folder' and trashed = false",
+                q="mimeType='application/vnd.google-apps.folder' and trashed=false",
                 spaces='drive',
                 fields='nextPageToken, files(id, name, parents)',
                 pageSize=100,
                 pageToken=page_token
             ).execute()
 
-            for folder in response.get('files', []):
-                if not folder.get('parents'):
-                    computers_folders.append(folder)
-
-            page_token = response.get('nextPageToken', None)
-            if page_token is None:
+            folders.extend([f for f in response.get('files', []) if not f.get('parents')])
+            page_token = response.get('nextPageToken')
+            if not page_token:
                 break
         except Exception:
-            write_log(f"⚠️ Error fetching computers folders: {traceback.format_exc()}")
+            write_log(f"⚠️ Folder fetch error: {traceback.format_exc()}")
             break
 
-    write_log(f"✅ Found {len(computers_folders)} root folders.")
-    return computers_folders
+    write_log(f"✅ Found {len(folders)} root folders.")
+    return folders
 
-
-def replicate_batch(service, folders_batch, local_base_path):
-    for index, folder in enumerate(folders_batch, 1):
-        folder_path = os.path.join(local_base_path, folder['name'])
-        write_log(f"📂 Batch Processing: {folder['name']}")
-        process_folder(service, folder['id'], folder_path)
-
-
-def replicate_computers_section(service, local_base_path):
-    computers_folders = fetch_computers_root_folders(service)
-    if not computers_folders:
-        write_log("❌ No folders found in 'Computers' section.")
-        return
-
-    for index, folder in enumerate(computers_folders, 1):
-        folder_path = os.path.join(local_base_path, folder['name'])
-        write_log(f"📂 ({index}/{len(computers_folders)}) Processing: {folder['name']}")
-        process_folder(service, folder['id'], folder_path)
-
-    write_log(f"🎉 All folders processed successfully at '{local_base_path}'.")
-
-def split_into_batches(lst, n):
-    """Split a list into `n` approximately equal batches."""
+def split_batches(lst, n):
     k, m = divmod(len(lst), n)
     return (lst[i*k + min(i, m):(i+1)*k + min(i+1, m)] for i in range(n))
 
-def process_batch(service, folders_batch, local_base_path, batch_id):
-    for index, folder in enumerate(folders_batch, 1):
-        folder_path = os.path.join(local_base_path, folder['name'])
-        write_log(f"[Batch-{batch_id}] 📂 ({index}/{len(folders_batch)}) Processing: {folder['name']}")
-        process_folder(service, folder['id'], folder_path, max_passes=3, delay_between_passes=30)
-    write_log(f"[Batch-{batch_id}] ✅ Batch complete.")
+def process_batch(service, batch, base_path, batch_id):
+    for folder in batch:
+        folder_path = BASE_DIR / base_path / folder['name']
+        write_log(f"[Batch-{batch_id}] Processing: {folder['name']}")
+        process_folder(service, folder['id'], str(folder_path.relative_to(BASE_DIR)))
 
 def main():
     try:
-        service = authenticate_drive()
-        local_base_folder = os.path.join(os.getcwd(), "Computers_Drive")
-        os.makedirs(local_base_folder, exist_ok=True)
+        write_log(f"\n{'='*40}")
+        write_log(f"🏁 Starting execution in: {BASE_DIR}")
+        write_log(f"📁 Contents: {[f.name for f in BASE_DIR.iterdir()]}")
 
-        computers_folders = fetch_computers_root_folders(service)
-        if not computers_folders:
-            write_log("❌ No folders found in 'Computers' section.")
+        service = authenticate_drive()
+        base_folder = BASE_DIR / "Computers_Drive"
+        base_folder.mkdir(exist_ok=True)
+
+        folders = fetch_computers_folders(service)
+        if not folders:
+            write_log("❌ No folders found")
             return
 
-        num_cores = os.cpu_count() or 4
-        batches = list(split_into_batches(computers_folders, num_cores))
+        num_workers = os.cpu_count() or 4
+        batches = list(split_batches(folders, num_workers))
 
-        write_log(f"🚀 Starting download with {num_cores} parallel batches.")
-
+        write_log(f"🚀 Starting {num_workers} parallel batches")
         processes = []
+
         for i, batch in enumerate(batches):
-            p = Process(target=process_batch, args=(service, batch, local_base_folder, i+1))
+            p = Process(target=process_batch, args=(service, batch, base_folder, i+1))
             p.start()
             processes.append(p)
 
+        # Process management with timeout
         for p in processes:
-            p.join()
+            p.join(timeout=7200)  # 2-hour timeout
+            if p.exitcode is None:
+                p.terminate()
+                write_log("⚠️ Terminated stalled process")
 
-        write_log("🎉 All parallel batches completed successfully!")
+        write_log("🎉 All batches completed!")
+        sys.exit(0)
 
     except Exception:
-        write_log(f"🔥 Fatal error: {traceback.format_exc()}")
+        write_log(f"🔥 Critical error: {traceback.format_exc()}")
+        sys.exit(1)
 
 if __name__ == '__main__':
+    freeze_support()  # Required for PyInstaller
     main()

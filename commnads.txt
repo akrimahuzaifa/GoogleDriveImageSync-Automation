@@ -1,0 +1,8 @@
+To document the require libraries
+pip freeze > requirements.txt
+
+for pyinstaller to make exe file
+C:\Users\Akrima\AppData\Roaming\Python\Python313\Scripts\pyinstaller --noconfirm --clean --onefile --icon=image_sync-icon.ico main.py
+
+to add credentials and token to exe
+C:\Users\Akrima\AppData\Roaming\Python\Python313\Scripts\pyinstaller --noconfirm --clean --onefile --add-data "credentials.json;." --add-data "token.json;." --icon=image_sync-icon.ico main.py
