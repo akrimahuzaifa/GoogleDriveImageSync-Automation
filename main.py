@@ -77,8 +77,8 @@ def resize_image(file_path):
 
         new_file_size = os.path.getsize(file_path)
         write_log(
-            f"    • Dimensions: {original_dimensions} → {img.size}\t"
-            f"    • Size: {human_readable_size(original_file_size)} → {human_readable_size(new_file_size)}\n"
+            f"• Dimensions: {original_dimensions} → {img.size}"
+            f"• Size: {human_readable_size(original_file_size)} → {human_readable_size(new_file_size)}\t"
             f"🖼️ Resized: {file_path}"
         )
     except UnidentifiedImageError:
@@ -107,7 +107,7 @@ def download_image(service, file_id, file_name, folder_path):
 def process_folder(service, folder_id, parent_path, max_passes=3, delay=30):
     parent_dir = BASE_DIR / parent_path
     parent_dir.mkdir(parents=True, exist_ok=True)
-    write_log(f"\n📁 Processing folder: {parent_path}")
+    write_log(f"📁 Processing folder: {parent_path}")
 
     existing_files = {f.name for f in parent_dir.iterdir() if f.is_file()}
     
@@ -139,12 +139,9 @@ def process_folder(service, folder_id, parent_path, max_passes=3, delay=30):
                             file_age = datetime.now() - datetime.fromtimestamp(file_path.stat().st_mtime)
                             if file_age.days > 3:
                                 file_path.unlink()
-                                write_log(f"🗑️ Deleted old file ({file_age.days} days): {file_path}")
-                                # Download fresh copy after deletion
-                                download_image(service, img['id'], img['name'], parent_path)
-                                new_files += 1
-                            else:
-                                write_log(f"⏩ Skipped recent file: {file_path} ({file_age.days} days old)")
+                                write_log(f"🗑️ Deleted old file during Downloading process ({file_age.days}): {file_path}")
+                            #else:
+                                #write_log(f"⏩ Skipped recent file: [{file_age.days} day(s) old] Path: {file_path}")
                         continue
                     
                     # New file download
@@ -211,12 +208,77 @@ def process_batch(service, batch, base_path, batch_id):
         write_log(f"[Batch-{batch_id}] Processing: {folder['name']}")
         process_folder(service, folder['id'], str(folder_path.relative_to(BASE_DIR)))
 
+def cleanup_old_files(base_dir, days=3):
+    write_log("🟢 Runing cleanup_old_files...")
+    cutoff = datetime.now() - timedelta(days=days)
+    for root, dirs, files in os.walk(base_dir, topdown=False):
+        # Delete old files
+        for name in files:
+            file_path = Path(root) / name
+            this_timestamp = datetime.fromtimestamp(file_path.stat().st_mtime)
+            if this_timestamp < cutoff:
+                try:
+                    file_path.unlink()
+                    write_log(f"🗑️  Pre-Cleaning: Deleted  (timestamp: {this_timestamp}, cutoff: {cutoff}): {file_path}")
+                except Exception as e:
+                    write_log(f"⚠️  Pre-Cleaning: Error deleting file {file_path}: {e}")
+            #else:
+                #write_log(f"⏩ Pre-Cleaning: Skipped recent file (timestamp: {this_timestamp}, cutoff: {cutoff}): {file_path}")
+
+        # Delete empty old folders
+        for name in dirs:
+            dir_path = Path(root) / name
+            try:
+                if not any(dir_path.iterdir()) and datetime.fromtimestamp(dir_path.stat().st_mtime) < cutoff:
+                    dir_path.rmdir()
+                    write_log(f"🗑️  Pre-Cleaning: Deleted old empty folder: {dir_path}")
+            except Exception as e:
+                write_log(f"⚠️  Pre-Cleaning: Error deleting folder {dir_path}: {e}")
+    write_log(f"✅ Pre-Cleaning: {days} day(s) old files checked & are removed...!")
+
+
+def cleanup_old_log_entries(log_file, days=7):
+    write_log("🟢 Runing cleanup_old_log_entries...")
+    if not log_file.exists():
+        write_log("❌ Log file not found... Will be created in run")
+        return
+    
+    cutoff = datetime.now() - timedelta(days=days)
+    # Use errors='replace' to avoid UnicodeDecodeError
+    log_text = log_file.read_text(encoding='utf-8', errors='replace')
+    new_lines = []
+    for line in log_text.splitlines(keepends=True):
+        if line.startswith('['):
+            try:
+                timestamp_str = line.split(']')[0][1:]
+                log_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+                if log_time >= cutoff:
+                    new_lines.append(line)
+            except Exception:
+                # If parsing fails, keep the line
+                new_lines.append(line)
+        else:
+            # Keep separator or non-timestamp lines
+            new_lines.append(line)
+    log_file.write_text(''.join(new_lines), encoding='utf-8')
+    write_log(f"✅ Log file checked for last {days} entries & are removed...!")
+
 def main():
     try:
-        write_log(f"\n{'='*40}")
+        write_log(f"{'='*40}")
         write_log(f"🏁 Starting execution in: {BASE_DIR}")
         write_log(f"📁 Contents: {[f.name for f in BASE_DIR.iterdir()]}")
+        
+        # Cleanup old log entries before authentication
+        cleanup_old_log_entries(LOG_FILE)
 
+        # Cleanup old files/folders before authentication
+        computers_drive = BASE_DIR / "Computers_Drive"
+        if computers_drive.exists():
+            cleanup_old_files(computers_drive)
+
+        # Authenticate and fetch folders
+        write_log("🔑 Authenticating with Google Drive...")
         service = authenticate_drive()
         base_folder = BASE_DIR / "Computers_Drive"
         base_folder.mkdir(exist_ok=True)
@@ -237,14 +299,9 @@ def main():
             p.start()
             processes.append(p)
 
-        # Process management with timeout
-        for p in processes:
-            p.join(timeout=7200)  # 2-hour timeout
-            if p.exitcode is None:
-                p.terminate()
-                write_log("⚠️ Terminated stalled process")
 
         write_log("🎉 All batches completed!")
+        write_log(f"{'='*40}")
         sys.exit(0)
 
     except Exception:
