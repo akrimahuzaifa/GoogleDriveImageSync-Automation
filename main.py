@@ -12,6 +12,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
+from tqdm import tqdm # Progress bar
 
 # --- Path Configuration ---
 if getattr(sys, 'frozen', False):
@@ -76,11 +77,13 @@ def resize_image(file_path):
             img.save(file_path, format='JPEG', quality=90)
 
         new_file_size = os.path.getsize(file_path)
+        """
         write_log(
             f"• Dimensions: {original_dimensions} → {img.size}"
             f"• Size: {human_readable_size(original_file_size)} → {human_readable_size(new_file_size)}\t"
             f"🖼️ Resized: {file_path}"
         )
+        """
     except UnidentifiedImageError:
         write_log(f"⚠️ Unidentified image format: {file_path}")
     except Exception as e:
@@ -97,7 +100,7 @@ def download_image(service, file_id, file_name, folder_path):
             downloader = MediaIoBaseDownload(f, request)
             while not downloader.next_chunk()[1]: pass
 
-        write_log(f"✅ Downloaded: {file_path}")
+        #write_log(f"✅ Downloaded: {file_path}")
         if RESIZE_IMG:
             resize_image(str(file_path))
 
@@ -130,7 +133,7 @@ def process_folder(service, folder_id, parent_path, max_passes=3, delay=30):
                 subfolders = [f for f in items if f['mimeType'] == 'application/vnd.google-apps.folder']
                 images = [f for f in items if 'image/' in f['mimeType']]
 
-                for img in images:
+                for img in tqdm(images, desc=f"Processing images ", unit="image"):
                     file_path = parent_dir / img['name']
                     
                     # File existence and age check
@@ -203,7 +206,7 @@ def split_batches(lst, n):
     return (lst[i*k + min(i, m):(i+1)*k + min(i+1, m)] for i in range(n))
 
 def process_batch(service, batch, base_path, batch_id):
-    for folder in batch:
+    for folder in tqdm(batch, desc=f"[Batch-{batch_id}] Progress", unit="folder"):
         folder_path = BASE_DIR / base_path / folder['name']
         write_log(f"[Batch-{batch_id}] Processing: {folder['name']}")
         process_folder(service, folder['id'], str(folder_path.relative_to(BASE_DIR)))
@@ -211,43 +214,45 @@ def process_batch(service, batch, base_path, batch_id):
 def cleanup_old_files(base_dir, days=3):
     write_log("🟢 Runing cleanup_old_files...")
     cutoff = datetime.now() - timedelta(days=days)
+    all_files = []
+    all_dirs = []
     for root, dirs, files in os.walk(base_dir, topdown=False):
-        # Delete old files
         for name in files:
-            file_path = Path(root) / name
-            this_timestamp = datetime.fromtimestamp(file_path.stat().st_mtime)
-            if this_timestamp < cutoff:
-                try:
-                    file_path.unlink()
-                    write_log(f"🗑️  Pre-Cleaning: Deleted  (timestamp: {this_timestamp}, cutoff: {cutoff}): {file_path}")
-                except Exception as e:
-                    write_log(f"⚠️  Pre-Cleaning: Error deleting file {file_path}: {e}")
-            #else:
-                #write_log(f"⏩ Pre-Cleaning: Skipped recent file (timestamp: {this_timestamp}, cutoff: {cutoff}): {file_path}")
-
-        # Delete empty old folders
+            all_files.append(Path(root) / name)
         for name in dirs:
-            dir_path = Path(root) / name
-            try:
-                if not any(dir_path.iterdir()) and datetime.fromtimestamp(dir_path.stat().st_mtime) < cutoff:
-                    dir_path.rmdir()
-                    write_log(f"🗑️  Pre-Cleaning: Deleted old empty folder: {dir_path}")
-            except Exception as e:
-                write_log(f"⚠️  Pre-Cleaning: Error deleting folder {dir_path}: {e}")
-    write_log(f"✅ Pre-Cleaning: {days} day(s) old files checked & are removed...!")
+            all_dirs.append(Path(root) / name)
 
+    for file_path in tqdm(all_files, desc="Cleaning old files", unit="file"):
+        this_timestamp = datetime.fromtimestamp(file_path.stat().st_mtime)
+        if this_timestamp < cutoff:
+            try:
+                file_path.unlink()
+                write_log(f"🗑️  Pre-Cleaning: Deleted  (timestamp: {this_timestamp}, cutoff: {cutoff}): {file_path}")
+            except Exception as e:
+                write_log(f"⚠️  Pre-Cleaning: Error deleting file {file_path}: {e}")
+
+    for dir_path in tqdm(all_dirs, desc="Cleaning old folders", unit="folder"):
+        try:
+            if not any(dir_path.iterdir()) and datetime.fromtimestamp(dir_path.stat().st_mtime) < cutoff:
+                dir_path.rmdir()
+                write_log(f"🗑️  Pre-Cleaning: Deleted old empty folder: {dir_path}")
+        except Exception as e:
+            write_log(f"⚠️  Pre-Cleaning: Error deleting folder {dir_path}: {e}")
+
+    write_log(f"✅ Pre-Cleaning: {days} day(s) old files checked & are removed...!")
 
 def cleanup_old_log_entries(log_file, days=7):
     write_log("🟢 Runing cleanup_old_log_entries...")
     if not log_file.exists():
         write_log("❌ Log file not found... Will be created in run")
         return
-    
+
     cutoff = datetime.now() - timedelta(days=days)
     # Use errors='replace' to avoid UnicodeDecodeError
     log_text = log_file.read_text(encoding='utf-8', errors='replace')
+    lines = log_text.splitlines(keepends=True)
     new_lines = []
-    for line in log_text.splitlines(keepends=True):
+    for line in tqdm(lines, desc="Cleaning old log entries", unit="line"):
         if line.startswith('['):
             try:
                 timestamp_str = line.split(']')[0][1:]
@@ -299,6 +304,9 @@ def main():
             p.start()
             processes.append(p)
 
+        # Wait for all processes to finish
+        for p in processes:
+            p.join()
 
         write_log("🎉 All batches completed!")
         write_log(f"{'='*40}")
