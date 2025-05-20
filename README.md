@@ -2,9 +2,10 @@
 
 A Python-based utility to replicate the folder structure under the Google Drive **"Computers" section**, download image files, and maintain optimized, up-to-date local backups.
 
-### NOTE: YOU NEED TO DOWNLOAD THE CREDENTIALS.JSON FILE FROM THE GOOGLE CONSOLE
+### NOTE:
 
----
+- You need to download the credentials.json file from the google console for this to work.
+- If you need to build this project into EXE for deployment, please follow the instruction [here](README_Build_Guide.md)
 
 ## 🚀 Features
 
