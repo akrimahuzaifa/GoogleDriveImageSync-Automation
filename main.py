@@ -227,7 +227,7 @@ def cleanup_old_files(base_dir, days=3):
         if this_timestamp < cutoff:
             try:
                 file_path.unlink()
-                write_log(f"🗑️  Pre-Cleaning: Deleted  (timestamp: {this_timestamp}, cutoff: {cutoff}): {file_path}")
+                #write_log(f"🗑️  Pre-Cleaning: Deleted  (timestamp: {this_timestamp}, cutoff: {cutoff}): {file_path}")
             except Exception as e:
                 write_log(f"⚠️  Pre-Cleaning: Error deleting file {file_path}: {e}")
 
