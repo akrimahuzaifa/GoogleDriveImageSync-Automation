@@ -235,7 +235,7 @@ def cleanup_old_files(base_dir, days=3):
         try:
             if not any(dir_path.iterdir()) and datetime.fromtimestamp(dir_path.stat().st_mtime) < cutoff:
                 dir_path.rmdir()
-                write_log(f"🗑️  Pre-Cleaning: Deleted old empty folder: {dir_path}")
+                #write_log(f"🗑️  Pre-Cleaning: Deleted old empty folder: {dir_path}")
         except Exception as e:
             write_log(f"⚠️  Pre-Cleaning: Error deleting folder {dir_path}: {e}")
 
