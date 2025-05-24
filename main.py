@@ -233,7 +233,7 @@ def cleanup_old_files(base_dir, days=3):
 
     for dir_path in tqdm(all_dirs, desc="Cleaning old folders", unit="folder"):
         try:
-            if not any(dir_path.iterdir()) and datetime.fromtimestamp(dir_path.stat().st_mtime) < cutoff:
+            if not any(dir_path.iterdir()):
                 dir_path.rmdir()
                 #write_log(f"🗑️  Pre-Cleaning: Deleted old empty folder: {dir_path}")
         except Exception as e:
@@ -272,7 +272,7 @@ def main():
     try:
         write_log(f"{'='*40}")
         write_log(f"🏁 Starting execution in: {BASE_DIR}")
-        write_log(f"📁 Contents: {[f.name for f in BASE_DIR.iterdir()]}")
+        #write_log(f"📁 Contents: {[f.name for f in BASE_DIR.iterdir()]}")
         
         # Cleanup old log entries before authentication
         cleanup_old_log_entries(LOG_FILE)
