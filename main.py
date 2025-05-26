@@ -20,9 +20,13 @@ if getattr(sys, 'frozen', False):
 else:
     BASE_DIR = Path(__file__).parent
 
+# --- Log Directory and File Setup ---
+LOG_DIR = BASE_DIR / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+LOG_FILE = LOG_DIR / f"download_progress_{datetime.now().strftime('%Y-%m-%d')}.log"
+
 # --- Constants ---
 SCOPES = ['https://www.googleapis.com/auth/drive']
-LOG_FILE = BASE_DIR / "download_progress.log"
 RESIZE_IMG = True
 THUMBNAIL_SIZE = (800, 800)
 
@@ -241,6 +245,35 @@ def cleanup_old_files(base_dir, days=3):
 
     write_log(f"✅ Pre-Cleaning: {days} day(s) old files checked & are removed...!")
 
+def cleanup_old_log_With_file_Name(log_dir, days=7):
+    """Delete log files in log_dir older than 'days' days."""
+    cutoff = datetime.now() - timedelta(days=days)
+    for log_file in tqdm(log_dir.glob("download_progress_*.log"), desc="Cleaning old log files", unit="file"):
+        try:
+            # Extract date from filename
+            date_str = log_file.stem.replace("download_progress_", "")
+            log_date = datetime.strptime(date_str, "%Y-%m-%d")
+            if log_date < cutoff:
+                log_file.unlink()
+                #write_log(f"🗑️ Deleted old log file: {log_file.name}")
+        except Exception as e:
+            write_log(f"⚠️ Error deleting log file {log_file.name}: {e}")
+
+def cleanup_old_log_files(log_dir, days=7):
+    """Delete log files in log_dir older than 'days' days, based on modified date."""
+    cutoff = datetime.now() - timedelta(days=days)
+    for log_file in tqdm(log_dir.glob("download_progress_*.log"), desc="Cleaning old log files", unit="file"):
+        try:
+            modified_time = datetime.fromtimestamp(log_file.stat().st_mtime)
+            if modified_time < cutoff:
+                log_file.unlink()
+            #     write_log(f"🗑️ Deleted old log file: {log_file.name}")
+            # else:
+            #     write_log(f"⏩ Skipped recent log file: {log_file.name} (modified on {modified_time}) (cutoff: {cutoff})")
+        except Exception as e:
+            write_log(f"⚠️ Error deleting log file {log_file.name}: {e}")
+
+
 def cleanup_old_log_entries(log_file, days=7):
     write_log("🟢 Runing cleanup_old_log_entries...")
     if not log_file.exists():
@@ -274,8 +307,8 @@ def main():
         write_log(f"🏁 Starting execution in: {BASE_DIR}")
         #write_log(f"📁 Contents: {[f.name for f in BASE_DIR.iterdir()]}")
         
-        # Cleanup old log entries before authentication
-        cleanup_old_log_entries(LOG_FILE)
+        # Cleanup old log files before authentication
+        cleanup_old_log_files(LOG_DIR)
 
         # Cleanup old files/folders before authentication
         computers_drive = BASE_DIR / "Computers_Drive"
