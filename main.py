@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import io
 import traceback
@@ -111,15 +112,46 @@ def download_image(service, file_id, file_name, folder_path):
     except Exception as e:
         write_log(f"❌ Error downloading {file_name}: {traceback.format_exc()}")
 
+def is_recent_date_folder(folder_name, days=2):
+    """Check if folder_name is in YYYY-MM-DD format and within 'days' from today."""
+    try:
+        # Check if folder_name matches exactly the YYYY-MM-DD pattern (e.g., "2023-05-15")
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", folder_name):
+            # Convert the folder name to a datetime object
+            folder_date = datetime.strptime(folder_name, "%Y-%m-%d")
+            
+            # Calculate the time difference between today and folder_date
+            delta = datetime.now().date() - folder_date.date()
+            
+            # Return True if the folder date is within the last 'days' days (including today and future dates)
+            return 0 <= delta.days <= days
+    except Exception:
+        # If any error occurs (e.g., invalid date like "2023-02-30"), silently catch it
+        write_log(f"⚠️ Invalid folder name date: {folder_name}")
+        pass
+    return False
+
+
 def process_folder(service, folder_id, parent_path, max_passes=3, delay=30):
     parent_dir = BASE_DIR / parent_path
     parent_dir.mkdir(parents=True, exist_ok=True)
+
+    folder_name = parent_dir.name
+
+    # --- Date folder check ---
+    #print(f"Checking Folder Age by name: {folder_name}")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", folder_name):
+        if not is_recent_date_folder(folder_name):
+            # If the folder name is a date but not within the last 2 days, skip processing
+            write_log(f"⏩ Skipping folder '{folder_name}' (not within last 2 days)")
+            return
+
     write_log(f"📁 Processing folder: {parent_path}")
 
     existing_files = {f.name for f in parent_dir.iterdir() if f.is_file()}
     
     for attempt in range(max_passes):
-        write_log(f"🔁 Pass {attempt + 1}/{max_passes} for {parent_path}")
+        #write_log(f"🔁 Pass {attempt + 1}/{max_passes} for {parent_path}")
         new_files = 0
 
         try:
